@@ -7,7 +7,7 @@ on:
     branches:
       - main
   workflow_dispatch:
-    
+
 jobs:
   build-three-tier-app:
     runs-on: ubuntu-latest
@@ -66,6 +66,21 @@ jobs:
             echo "Application is not healthy."
             exit 1
           fi
+
+      - name: Debug Application
+        if: always()
+        run: |
+          echo "========== CONTAINER STATUS =========="
+          docker compose ps -a
+
+          echo "========== APPLICATION LOGS =========="
+          docker compose logs app
+
+          echo "========== MYSQL LOGS =========="
+          docker compose logs mysql
+
+          echo "========== PORT CHECK =========="
+          curl -v http://localhost:8080/health || true
 
       - name: List Running Containers
         run: docker ps -a
