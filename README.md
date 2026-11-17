@@ -92,8 +92,8 @@ The app is configured through environment variables.
 |---|---|---|
 | `DB_HOST` | MySQL host | `localhost` |
 | `DB_PORT` | MySQL port | `3306` |
-| `DB_USER` | Database user | `root` |
-| `DB_PASSWORD` | Database password | *<db_password>* |
+| `DB_USER` | Database user | `<db_user>` |
+| `DB_PASSWORD` | Database password | `<db_password>` |
 | `DB_NAME` | Database name | `task_tracker` |
 | `PORT` | HTTP port the app listens on | `3000` |
 
