@@ -15,9 +15,10 @@ services:
       interval: 10s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 1m30s
 
   app:
+    image: three-tier-app:latest
     build:
       context: .
       dockerfile: Dockerfile
