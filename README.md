@@ -1,25 +1,23 @@
-# Task Tracker: Three-Tier App with a DevOps Pipeline
+# Task Tracker: Three-Tier App with GitHub Actions CI/CD
 
-A small task manager built as a **three-tier web application** and deployed with a fully automated **CI/CD pipeline**: GitHub → Jenkins → Docker Hub → Amazon EKS, with the database on Amazon RDS (MySQL).
+![CI/CD](https://github.com/<owner>/<repo>/actions/workflows/ci-cd.yml/badge.svg)
 
-This README focuses on **how the app is built, shipped and deployed**. For the application code itself, see [Application Overview](#application-overview).
-
----
+A small task manager built as a **three-tier web application** (browser UI, Express API, MySQL database), packaged as a Docker image and built, tested and published to Docker Hub by a **GitHub Actions** workflow.
 
 ## Table of Contents
 
 1. [Architecture](#architecture)
 2. [Tech Stack](#tech-stack)
 3. [Repository Structure](#repository-structure)
-4. [Application Overview](#application-overview)
+4. [API](#api)
 5. [Configuration](#configuration)
-6. [Run Locally](#run-locally)
-7. [Containerization (Docker)](#containerization-docker)
-8. [Kubernetes Manifests](#kubernetes-manifests)
-9. [CI/CD Pipeline (Jenkins)](#cicd-pipeline-jenkins)
-10. [AWS Infrastructure Setup](#aws-infrastructure-setup)
-11. [Deploying](#deploying)
-12. [Verifying the Deployment](#verifying-the-deployment)
+6. [Run Locally with Docker Compose](#run-locally-with-docker-compose)
+7. [Run Locally with Node.js](#run-locally-with-nodejs)
+8. [Docker Image](#docker-image)
+9. [CI/CD with GitHub Actions](#cicd-with-github-actions)
+10. [Running the Published Image](#running-the-published-image)
+11. [Security Notes](#security-notes)
+12. [Known Limitations](#known-limitations)
 13. [Troubleshooting](#troubleshooting)
 
 ---
@@ -28,30 +26,17 @@ This README focuses on **how the app is built, shipped and deployed**. For the a
 
 ```mermaid
 flowchart LR
-    Dev[Developer] -->|git push| GH[GitHub]
-    GH -->|checkout| J[Jenkins]
-    J -->|docker build / test / push| DH[(Docker Hub)]
-    J -->|kubectl apply| EKS
-
-    subgraph AWS
-      subgraph EKS[Amazon EKS cluster]
-        SVC[Service: NodePort 30080] --> P1[Pod]
-        SVC --> P2[Pod]
-        SVC --> P3[Pod]
-      end
-      RDS[(Amazon RDS MySQL)]
-    end
-
-    DH -->|image pull| EKS
-    P1 & P2 & P3 -->|SQL :3306| RDS
-    User[Browser] -->|HTTP :30080| SVC
+    B[Browser] -->|HTTP| A[Express app: serves UI and API]
+    A -->|SQL :3306| D[(MySQL)]
 ```
 
-| Tier | Responsibility | Where it runs |
+| Tier | Responsibility | Files |
 |---|---|---|
-| **1. Presentation** | Static HTML/CSS/JS served by Express | Inside the app container |
-| **2. Application** | Express REST API, validation, business rules | Inside the app container (3 replicas on EKS) |
-| **3. Data** | MySQL database, `tasks` table created automatically on startup | Amazon RDS |
+| **1. Presentation** | Static HTML, CSS and vanilla JavaScript. Talks to the API only through `fetch()` | `public/` |
+| **2. Application** | Express REST API: input validation and business rules | `server.js` |
+| **3. Data** | MySQL access layer. Creates the `tasks` table on startup | `db.js` |
+
+The UI never touches the database directly, and `db.js` knows nothing about HTTP.
 
 ## Tech Stack
 
@@ -59,216 +44,228 @@ flowchart LR
 |---|---|
 | Frontend | HTML, CSS, vanilla JavaScript |
 | Backend | Node.js 22, Express 4 |
-| Database | MySQL (Amazon RDS), accessed with `mysql2` |
-| Containerization | Docker (`node:22-alpine`) |
+| Database | MySQL (8.4 in Docker Compose), accessed with `mysql2` |
+| Config | Environment variables, `dotenv` for local `.env` files |
+| Containers | Docker (`node:22-alpine`), Docker Compose |
 | Registry | Docker Hub |
-| CI/CD | Jenkins (declarative pipeline) |
-| Orchestration | Kubernetes on Amazon EKS |
-| Cloud | AWS (EKS, RDS, IAM, EC2) |
+| CI/CD | GitHub Actions |
 
 ## Repository Structure
 
 ```
-three-tier-app/
-├── Dockerfile               # Container image definition
-├── Jenkinsfile              # CI/CD pipeline
-├── kubernetes/
-│   ├── deployment.yaml      # App Deployment (3 replicas)
-│   ├── service.yaml         # NodePort Service (30080 → 3000)
-│   └── secrets.yaml         # DB credentials as a Kubernetes Secret
-├── public/                  # Tier 1: UI (index.html, style.css, app.js)
-├── server.js                # Tier 2: Express API
-├── db.js                    # Tier 3: MySQL access layer
+.
+├── .github/workflows/ci-cd.yml   # GitHub Actions workflow
+├── public/                       # Tier 1: UI (index.html, app.js, style.css)
+├── server.js                     # Tier 2: Express API
+├── db.js                         # Tier 3: MySQL access layer
+├── Dockerfile                    # Image definition
+├── docker-compose.yml            # App + MySQL for local use and CI tests
+├── .env.example                  # Template for environment variables
+├── .dockerignore
+├── .gitignore
 ├── package.json
-├── .env.example             # Template for local/test environment variables
-├── kubectl.sha256           # Checksum for the kubectl binary
-└── README.md
+├── package-lock.json
+└── kubectl.sha256                # Leftover checksum; not used by the workflow
 ```
 
-## Application Overview
-
-REST API exposed by `server.js`:
+## API
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/tasks` | List all tasks |
-| `POST` | `/api/tasks` | Create a task (`{ "title": "..." }`, max 140 chars) |
+| `GET` | `/api/tasks` | List all tasks, newest first |
+| `POST` | `/api/tasks` | Create a task. Body: `{ "title": "..." }` (required, up to 140 characters). Returns `201` |
 | `PATCH` | `/api/tasks/:id` | Toggle a task's done state |
-| `DELETE` | `/api/tasks/:id` | Delete a task |
-| `GET` | `/health` | Health check (returns `200 OK`) |
+| `DELETE` | `/api/tasks/:id` | Delete a task. Returns `204` |
+| `GET` | `/health` | Health check. Returns `200` with body `OK` |
 
-On startup the app runs `CREATE TABLE IF NOT EXISTS tasks ...`, so no manual schema setup is needed.
+Errors: `400` for a missing or too-long title or an invalid id, `404` if the task does not exist, `500` for unexpected server or database errors.
+
+On startup the app runs `CREATE TABLE IF NOT EXISTS tasks ...`, so no manual schema setup is needed. The **database itself** must already exist (Docker Compose creates it for you).
 
 ## Configuration
 
-The app is configured entirely through environment variables (12-factor style).
+The app is configured through environment variables.
+
+**Application (`server.js`, `db.js`)**
 
 | Variable | Description | Default |
 |---|---|---|
-| `DB_HOST` | MySQL / RDS endpoint | `localhost` |
+| `DB_HOST` | MySQL host | `localhost` |
 | `DB_PORT` | MySQL port | `3306` |
 | `DB_USER` | Database user | `root` |
 | `DB_PASSWORD` | Database password | *(empty)* |
 | `DB_NAME` | Database name | `task_tracker` |
 | `PORT` | HTTP port the app listens on | `3000` |
 
-Locally these come from a `.env` file; on Kubernetes they are injected from a Secret.
+**MySQL container (`docker-compose.yml`)**
 
-## Run Locally
+| Variable | Description |
+|---|---|
+| `MYSQL_ROOT_PASSWORD` | Root password for the MySQL container |
+| `MYSQL_DATABASE` | Database created on first start |
+| `MYSQL_USER` | Application database user |
+| `MYSQL_PASSWORD` | Password for that user |
 
-**Prerequisites:** Node.js 18+ and a running MySQL/MariaDB instance (or an RDS endpoint you can reach).
+In Compose, the app's `DB_*` values are set automatically from the `MYSQL_*` values, so you only need to fill in the `MYSQL_*` block of your `.env`.
+
+Copy the template and edit it. **Never commit `.env`** (it is listed in `.gitignore`).
 
 ```bash
-git clone https://github.com/Sarthaki15/three-tier-app.git
-cd three-tier-app
+cp .env.example .env
+```
 
-cp .env.example .env        # edit with your DB credentials
+## Run Locally with Docker Compose
+
+Recommended. Starts the app and a MySQL 8.4 container together.
+
+**Prerequisites:** Docker with Docker Compose v2.
+
+```bash
+cp .env.example .env            # set the MYSQL_* values
+docker compose up -d --build
+```
+
+The app waits for MySQL to report healthy, which can take up to about a minute and a half on first start.
+
+```bash
+curl http://localhost:8080/health     # expect: OK
+```
+
+Open <http://localhost:8080>.
+
+Useful commands:
+
+```bash
+docker compose ps
+docker compose logs app mysql
+docker compose down            # stop containers, keep the database volume
+docker compose down -v         # stop and delete the database volume
+```
+
+The app is published on host port **8080** (container port 3000). MySQL is not published to the host.
+
+## Run Locally with Node.js
+
+**Prerequisites:** Node.js 22 (the version used in the Docker image) and a reachable MySQL server with the database already created.
+
+```bash
+cp .env.example .env     # set DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 npm install
 npm start
 ```
 
-Open <http://localhost:3000>.
+Open <http://localhost:3000> (or the `PORT` you set).
 
-## Containerization (Docker)
+## Docker Image
 
 ```dockerfile
 FROM node:22-alpine
 WORKDIR /app
-COPY . ./
-RUN npm install
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY . .
 EXPOSE 3000
 CMD ["node", "server.js"]
 ```
 
-Build and run:
+Dependencies are installed before the source is copied, so Docker reuses the cached dependency layer when only application code changes.
+
+Build and run the image on its own (it needs a MySQL database it can reach):
 
 ```bash
-docker build -t <dockerhub-user>/three-tier-app:local .
+docker build -t three-tier-app:local .
 
 docker run -d --name task-tracker \
-  --env-file .env \
+  -e DB_HOST=<mysql-host> -e DB_PORT=3306 \
+  -e DB_USER=<user> -e DB_PASSWORD=<password> -e DB_NAME=task_tracker \
   -p 8080:3000 \
-  <dockerhub-user>/three-tier-app:local
+  three-tier-app:local
 
-curl http://localhost:8080/health      # → OK
+curl http://localhost:8080/health     # expect: OK
 ```
 
-## Kubernetes Manifests
+## CI/CD with GitHub Actions
 
-| File | Purpose |
-|---|---|
-| `kubernetes/secrets.yaml` | `Secret` named `three-tier-app-db-secrets` holding `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` |
-| `kubernetes/deployment.yaml` | `Deployment` with **3 replicas** of the app image, container port `3000`, env loaded from the Secret |
-| `kubernetes/service.yaml` | `Service` of type **NodePort**: `8080 → 3000`, exposed on node port **30080** |
+Workflow: `.github/workflows/ci-cd.yml` (name: **CI/CD Pipeline**, job `build-three-tier-app`, runner `ubuntu-latest`).
 
+**Triggers**
 
-## CI/CD Pipeline (Jenkins)
-
-The `Jenkinsfile` defines a declarative pipeline with these stages:
-
-| # | Stage | What it does |
+| Trigger | Build and test | Push image to Docker Hub |
 |---|---|---|
-| 1 | **Git Checkout** | Clones the `main` branch from GitHub |
-| 2 | **Build Docker Image** | Builds the image and tags it `:<BUILD_NUMBER>` and `:latest` |
-| 3 | **Test Docker Image** | Starts the container with the `app-env-file` credential, waits, then runs `curl --fail` against `http://localhost:8080/`. The test container is always removed afterwards |
-| 4 | **Docker Hub Login** | Logs in using the `docker-login` credential |
-| 5 | **Push Docker Image** | Pushes both tags to Docker Hub |
-| 6 | **Deploy to EKS** | Configures `kubeconfig` for the cluster and applies the Secret, Deployment and Service |
-| 7 | **Verify Kubernetes Deployment** | Prints nodes, deployments, pods and services |
+| Push to `main` | Yes | Yes |
+| Pull request to `main` | Yes | No |
+| Manual run (`workflow_dispatch`) | Yes | No |
 
-**Pipeline environment variables**
+**Steps, in order**
 
-| Variable | Value |
-|---|---|
-| `DOCKERHUB_REPO` | `sarthakiparad2230/three-tier-app` |
-| `EKS_CLUSTER_NAME` | `CD-Cluster` |
+1. Check out the repository (`actions/checkout@v4`).
+2. Validate the Compose file (`docker compose config -q`).
+3. Build the image (`docker compose build`).
+4. *(push to `main` only)* Log in to Docker Hub, tag the image as `<DOCKERHUB_USERNAME>/three-tier-app:latest`, and push it.
+5. Start the app and MySQL (`docker compose up -d --no-build`).
+6. Wait 30 seconds, then call `http://localhost:8080/health`. The job fails if the check fails.
+7. Print container status and logs (always runs, even on failure).
 
-**Jenkins credentials required**
+**Required repository secrets and variables**
+(Settings > Secrets and variables > Actions)
 
-| Credential ID | Type | Contents |
+| Name | Kind | Used for |
 |---|---|---|
-| `app-env-file` | Secret file | A `.env`-format file used to run the test container (must point to a reachable DB) |
-| `docker-login` | Username with password | Docker Hub username + access token |
-| `aws_access_key` | AWS credentials | Access key / secret for an IAM user allowed to call EKS |
+| `MYSQL_ROOT_PASSWORD` | Secret | MySQL test container |
+| `MYSQL_PASSWORD` | Secret | MySQL test container and app |
+| `DOCKERHUB_USERNAME` | Secret | Docker Hub login and image name |
+| `DOCKERHUB_TOKEN` | Secret | Docker Hub login (use an access token) |
+| `MYSQL_DATABASE` | Variable | Test database name, e.g. `task_tracker` |
+| `MYSQL_USER` | Variable | Test database user |
 
-**Jenkins agent requirements:** Docker, AWS CLI v2, `kubectl`, `curl`, and permission for the `jenkins` user to run Docker (`usermod -aG docker jenkins`).
-
-## AWS Infrastructure Setup
-
-### 1. RDS (database tier)
-
-1. Create an **RDS instance** with the **MySQL** engine.
-2. Create the database named in `DB_NAME` (`task_tracker`), or set the initial database name during creation.
-3. Place it in the same VPC as the EKS cluster.
-4. **Security group:** allow inbound **TCP 3306** only from the EKS node / cluster security group, never from `0.0.0.0/0`.
-5. Note the endpoint, e.g. `<name>.<id>.<region>.rds.amazonaws.com`.
-
-### 2. EKS (application tier)
-
-1. Create an EKS cluster named **`CD-Cluster`** (or change `EKS_CLUSTER_NAME` in the `Jenkinsfile`) with a managed node group.
-2. Create an IAM user for Jenkins and grant it access to the cluster (IAM policy for `eks:DescribeCluster`, plus an EKS access entry or `aws-auth` mapping giving it Kubernetes permissions).
-3. Open the node security group for **TCP 30080** from the sources that should reach the app.
-
-### 3. Jenkins server
-
-1. Launch an EC2 instance, install Jenkins, Docker, AWS CLI and `kubectl`.
-2. Install the suggested plugins plus **Pipeline**, **Credentials Binding**, and **AWS Credentials**.
-3. Add the three credentials listed [above](#cicd-pipeline-jenkins).
-4. Set the default AWS region for the Jenkins user (`aws configure set region <region>`), because the pipeline's `aws eks update-kubeconfig` call doesn't pass `--region`.
-5. Create a **Pipeline** job using "Pipeline script from SCM" pointing to this repo, or paste the `Jenkinsfile`.
-
-## Deploying
-
-### Automated (recommended)
-
-1. Push changes to `main`.
-2. Trigger the Jenkins job (manually, or configure a GitHub webhook / poll SCM).
-3. Watch the stages complete in the Jenkins console.
-
-### Manual deployment (without Jenkins)
+Optional GitHub CLI commands:
 
 ```bash
-# 1. Point kubectl at the cluster
-aws eks update-kubeconfig --name CD-Cluster --region <region>
-
-# 2. Apply manifests
-kubectl apply -f kubernetes/secrets.yaml
-kubectl apply -f kubernetes/deployment.yaml
-kubectl apply -f kubernetes/service.yaml
-
-# 3. Watch the rollout
-kubectl rollout status deployment/three-tier-app-deployment
+gh workflow run "CI/CD Pipeline" --ref main
+gh run list --workflow "CI/CD Pipeline" --limit 5
+gh run view <run-id> --log-failed
 ```
 
-## Verifying the Deployment
+**Contributing flow:** open a pull request to `main`, wait for the workflow to pass, get it reviewed, then merge. Merging to `main` publishes the `latest` image.
+
+## Running the Published Image
+
+This repository does not include deployment automation. To run the published image anywhere that has Docker and a reachable MySQL database (for example Amazon RDS):
 
 ```bash
-kubectl get nodes
-kubectl get deployment
-kubectl get pods -o wide
-kubectl get svc three-tier-app-service
+docker pull <DOCKERHUB_USERNAME>/three-tier-app:latest
 
-# Logs
-kubectl logs deploy/three-tier-app-deployment
-
-# Health check from a node's public IP
-curl http://<node-public-ip>:30080/health
+docker run -d --name task-tracker \
+  -e DB_HOST=<mysql-endpoint> -e DB_PORT=3306 \
+  -e DB_USER=<user> -e DB_PASSWORD=<password> -e DB_NAME=task_tracker \
+  -p 80:3000 \
+  <DOCKERHUB_USERNAME>/three-tier-app:latest
 ```
 
-Then open `http://<node-public-ip>:30080` in your browser.
+If you use RDS, put it in the same network as the app host and allow inbound TCP 3306 only from the app's security group, never from `0.0.0.0/0`. To connect over SSL, enable the `ssl` option in `db.js` (it is commented out by default).
+
+## Security Notes
+
+- Keep real credentials out of Git. `.env` is ignored by `.gitignore`.
+- `.dockerignore` excludes `.env.*` (except `.env.example`) but **not a plain `.env`**. Do not build and push images from a working copy that contains a real `.env`; let CI build them, or remove `.env` first.
+- Use a Docker Hub **access token**, not your account password, for `DOCKERHUB_TOKEN`.
+- Use strong, unique database passwords and restrict network access to the database.
+
+## Known Limitations
+
+- The workflow pushes the image to Docker Hub **before** it runs the health test, so an image that later fails the test can already be published as `latest`.
+- Only the `latest` tag is published, so there is no older version tag to roll back to.
+- There are no automated unit tests; the health check is the only automated gate.
+- Pull requests from forks do not receive repository secrets, so the MySQL test container may fail to start for them.
 
 ## Troubleshooting
 
-| Symptom | Likely cause / fix |
+| Symptom | Likely cause and fix |
 |---|---|
-| `kubectl apply` fails with validation errors | Validate the manifests first with `kubectl apply --dry-run=client -f kubernetes/` and check YAML indentation |
-| Pods in `CrashLoopBackOff` with `Failed to initialize database schema` | App can't reach RDS. Check `DB_*` values, RDS security group (3306 from EKS nodes), and that the `task_tracker` database exists |
-| Pods in `ImagePullBackOff` | Image name/tag doesn't exist on Docker Hub, or the repo is private and no `imagePullSecret` is configured |
-| `Unable to locate credentials` or `You must be logged in` in Jenkins | Check the `aws_access_key` credential and the IAM user's EKS access mapping |
-| `aws eks update-kubeconfig` says cluster not found | Default AWS region isn't set for the Jenkins user |
-| Jenkins `docker: permission denied` | Add `jenkins` to the `docker` group and restart Jenkins |
-| Can't reach `:30080` | Open the port in the node security group; use a node's **public** IP |
-| Test stage fails on `curl` | Test container can't connect to the DB with the `app-env-file` values, so check `docker logs test-app` output in the console |
-
----
-
+| `docker compose config -q` fails | A `MYSQL_*` value is empty. Check your `.env` (locally) or the repository secrets and variables (in CI) |
+| App container exits with `Failed to initialize database schema` | The app cannot reach MySQL or the database does not exist. Check the `DB_*` values and `docker compose logs mysql` |
+| `curl` to `/health` fails right after start | MySQL is still starting. Wait for `docker compose ps` to show it healthy, then retry |
+| Port 8080 already in use | Stop the other process, or change the host port in `docker-compose.yml` |
+| Docker Login step fails in CI | `DOCKERHUB_USERNAME` or `DOCKERHUB_TOKEN` is wrong or expired |
+| Push step fails with `denied` | The Docker Hub repository does not exist or the token lacks write access |
+| Changed `.env` but the database user is unchanged | MySQL only reads these values on first start. Run `docker compose down -v` to reset the volume |
