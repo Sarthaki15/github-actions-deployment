@@ -45,10 +45,6 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           docker tag three-tier-app:latest $DOCKERHUB_USERNAME/three-tier-app:${{ github.run_number }}  
-        
-      - name: Docker Image Push
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: docker push "$DOCKERHUB_USERNAME/three-tier-app:${{ github.run_number }}"
 
       - name: Start Docker containers
         run: docker compose up -d --no-build
@@ -64,6 +60,10 @@ jobs:
             echo "Application is not healthy."
             exit 1
           fi
+
+      - name: Docker Image Push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker push "$DOCKERHUB_USERNAME/three-tier-app:${{ github.run_number }}"    
 
       - name: Debug Application
         if: always()
