@@ -21,8 +21,6 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      IMAGE_TAG: "latest"
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -46,11 +44,11 @@ jobs:
       - name: Docker Image Tagging
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          docker tag three-tier-app:latest $DOCKERHUB_USERNAME/three-tier-app:$IMAGE_TAG
+          docker tag three-tier-app:latest $DOCKERHUB_USERNAME/three-tier-app:${{ github.run_number }}  
         
       - name: Docker Image Push
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: docker push "$DOCKERHUB_USERNAME/three-tier-app:$IMAGE_TAG"
+        run: docker push "$DOCKERHUB_USERNAME/three-tier-app:${{ github.run_number }}"
 
       - name: Start Docker containers
         run: docker compose up -d --no-build
